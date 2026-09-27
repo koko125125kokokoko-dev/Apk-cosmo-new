@@ -1,0 +1,151 @@
+name: Build & Release Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (leave empty for auto v1.0.RUN_NUMBER)'
+        required: false
+        default: ''
+      release_title:
+        description: 'Release Title (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Publish Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x gradlew
+
+      - name: Setup Environment Secrets (.env)
+        run: |
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+      - name: Ensure Debug Keystore Exists
+        run: |
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkey -v -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build Debug APK with Gradle
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare APK Release Assets
+        id: prepare_assets
+        run: |
+          mkdir -p release_assets
+          BUILD_NUM="${GITHUB_RUN_NUMBER:-1}"
+          INPUT_TAG="${{ github.event.inputs.tag_name }}"
+          INPUT_TITLE="${{ github.event.inputs.release_title }}"
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          else
+            TAG_NAME="v1.0.${BUILD_NUM}"
+          fi
+
+          if [ -n "$INPUT_TITLE" ]; then
+            RELEASE_TITLE="$INPUT_TITLE"
+          else
+            RELEASE_TITLE="Cosmo Game Store ${TAG_NAME} (Debug APK)"
+          fi
+
+          VERSIONED_APK="release_assets/CosmoGameStore-${TAG_NAME}-debug.apk"
+          LATEST_APK="release_assets/CosmoGameStore-debug.apk"
+
+          cp app/build/outputs/apk/debug/app-debug.apk "$VERSIONED_APK"
+          cp app/build/outputs/apk/debug/app-debug.apk "$LATEST_APK"
+
+          APK_SHA256=$(sha256sum "$LATEST_APK" | awk '{print $1}')
+          APK_SIZE=$(ls -lh "$LATEST_APK" | awk '{print $5}')
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+          echo "versioned_apk=$VERSIONED_APK" >> "$GITHUB_OUTPUT"
+          echo "latest_apk=$LATEST_APK" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+          echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Debug APK Artifact (Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CosmoGameStore-Debug-APK
+          path: |
+            ${{ steps.prepare_assets.outputs.versioned_apk }}
+            ${{ steps.prepare_assets.outputs.latest_apk }}
+          retention-days: 30
+
+      - name: Create GitHub Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ steps.prepare_assets.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.prepare_assets.outputs.release_title }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          body: |
+            ### Cosmo Game Store - Debug APK Build (${{ steps.prepare_assets.outputs.tag_name }})
+
+            Automated debug APK build from commit `${{ github.sha }}`.
+
+            #### Direct APK Download Links:
+            - **[Direct Download Latest APK](${{ github.server_url }}/${{ github.repository }}/releases/latest/download/CosmoGameStore-debug.apk)** (Always newest APK)
+            - **[Direct Download ${{ steps.prepare_assets.outputs.tag_name }} APK](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.prepare_assets.outputs.tag_name }}/CosmoGameStore-${{ steps.prepare_assets.outputs.tag_name }}-debug.apk)** (Pinned version)
+
+            #### Build Information & Verification:
+            - **File Size:** `${{ steps.prepare_assets.outputs.apk_size }}`
+            - **SHA-256 Checksum:** `${{ steps.prepare_assets.outputs.apk_sha256 }}`
+
+            #### Installation Instructions:
+            1. Download `CosmoGameStore-debug.apk` directly to your Android device.
+            2. Open your device's Downloads folder and tap the APK to install.
+            3. If prompted by Android security (Install unknown apps):
+               - Tap Settings.
+               - Turn ON Allow from this source.
+            4. Tap Install and open Cosmo Game Store.
+          files: |
+            ${{ steps.prepare_assets.outputs.versioned_apk }}
+            ${{ steps.prepare_assets.outputs.latest_apk }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
