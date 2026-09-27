@@ -1,0 +1,6 @@
+{
+  "name": "Cosmo Game Store",
+  "description": "Cosmo Game Store with APK/XAPK installer, auto-launch, download notifications, and game catalog.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
